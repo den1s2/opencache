@@ -311,21 +311,24 @@ class Server:
             try:
                 self.server._node.print_debug(TAG, 'cache miss: %s%s' %(self.server._expr, self.path))
                 remote_object = self._fetch_and_send_object(self.server._expr)
-                if self._disk_check():
-                    lookup = self.server._server._database.lookup({'key' : key})
-                    if len(lookup) == 1:
-                        object_path = lookup[0]['path']
+                if remote_object:
+                    if self._disk_check():
+                        lookup = self.server._server._database.lookup({'key' : key})
+                        if len(lookup) == 1:
+                            object_path = lookup[0]['path']
+                        else:
+                            object_path = self.server._server_path + "/" + key
+                        f = open(object_path, 'w')
+                        f.write(remote_object)
+                        f.close()
+                        self.server._server._database.create({'expr' : self.server._expr, 'key' : key, 'path' : object_path})
                     else:
-                        object_path = self.server._server_path + "/" + key
-                    f = open(object_path, 'w')
-                    f.write(remote_object)
-                    f.close()
-                    self.server._server._database.create({'expr' : self.server._expr, 'key' : key, 'path' : object_path})
+                    	self.server._node.print_info(TAG, 'Cache instance has reached maximum disk usage and cannot store object: %s%s' %(self.server._expr, self.path))
+                    self.server._cache_miss += 1
+                    self.server._cache_miss_size += sys.getsizeof(remote_object)
                 else:
-                    self.server._node.print_info(TAG, 'Cache instance has reached maximum disk usage and cannot store object: %s%s' %(self.server._expr, self.path))
-                self.server._cache_miss += 1
-                self.server._cache_miss_size += sys.getsizeof(remote_object)
-            except Exception as e:
+			self.server._node.print_error(TAG, 'Could not fetch content from remote server')
+	     except Exception as e:
                 pass
 
         def _disk_check(self):
@@ -343,34 +346,45 @@ class Server:
 
         def _fetch_and_send_object(self, url):
             """Fetch the object from the original external location and deliver this to the client. """
-            connection = httplib.HTTPConnection(url)
-            connection.request("GET", self.path)
-            response = connection.getresponse()
-            length = int(response.getheader('content-length'))
-            self.send_response(200)
-            self.send_header('Content-type','text-html')
-            self.end_headers()
-            total_payload = ""
-            bytes_read = 0
-            while True:
-                try:
-                    read_payload = response.read(1448)
-                except Exception as e:
-                    self.server._node.print_error(TAG, 'Could not retrieve content from origin server: %s', e)
-                    break
-                try:
-                    self.wfile.write(read_payload)
-                except Exception as e:
-                    self.server._node.print_error(TAG, 'Could not deliver fetched content to client: %s', e)
-                    break
-                total_payload += read_payload
-                bytes_read += 1448
-                if bytes_read > length:
-                    break
-            self.wfile.close()
-            connection.close()
-            self.server._node.print_debug(TAG, 'cache fetched: %s%s at approx. %s bytes' %(url, self.path, bytes_read))
-            return total_payload
+            connection = httplib.HTTPConnection(url, timeout=10)
+            try:
+                connection.request("GET", self.path)
+                response = connection.getresponse()
+                length = int(response.getheader('content-length'))
+                self.send_response(200)
+                self.send_header('Content-type','text-html')
+                self.end_headers()
+                total_payload = ""
+                bytes_read = 0
+                while True:
+                    try:
+                        read_payload = response.read(1448)
+                    except Exception as e:
+                        self.server._node.print_error(TAG, 'Could not retrieve content from origin server: %s', e)
+                        break
+                    try:
+                        self.wfile.write(read_payload)
+                    except Exception as e:
+                        self.server._node.print_error(TAG, 'Could not deliver fetched content to client: %s', e)
+                        break
+                    total_payload += read_payload
+                    bytes_read += 1448
+                    if bytes_read > length:
+                        break
+                self.wfile.close()
+                connection.close()
+                self.server._node.print_debug(TAG, 'cache fetched: %s%s at approx. %s bytes' %(url, self.path, bytes_read))
+                return total_payload
+            except socket.error, e:
+                if isinstance(e.args, tuple):
+                    self.server._node.print_error(TAG, 'Socket error [%d]' % e[0])
+                    if e[0] == errno.EPIPE:
+                        self.server._node.print_error(TAG, 'Detected remote disconnect when fetching remote content')
+                    else:
+			pass
+                else:
+                    self.server._node.print_error(TAG, 'Socket error: %s' % e)
+                connection.close()
 
         def _send_object(self, data):
             """Deliver the cached object to the client"""
